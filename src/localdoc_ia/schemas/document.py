@@ -4,7 +4,10 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from decimal import Decimal, InvalidOperation
+import re
 
+from pydantic import field_validator, model_validator
 
 class SchemaBase(BaseModel):
     """Configuración común para los esquemas del proyecto."""

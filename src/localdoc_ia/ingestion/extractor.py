@@ -104,7 +104,7 @@ def build_result(
 
 def extract_pdf(
     file_path: Path,
-    dpi: int = 200,
+    dpi: int = 300,
     lang: str = "spa",
     minimum_text_chars: int = 30,
 ) -> ExtractionResult:
@@ -135,7 +135,7 @@ def extract_pdf(
                 page_number = page_index + 1
 
                 # Intentar primero extraer texto nativo
-                native_text = page.get_text("text").strip()
+                native_text = page.get_text("text", sort=True).strip()
 
                 if has_usable_text(
                     native_text,
@@ -226,7 +226,7 @@ def extract_image(
 
 def extract_document(
     file_path: str | Path,
-    dpi: int = 200,
+    dpi: int = 300,
     lang: str = "spa",
 ) -> ExtractionResult:
     """
