@@ -9,3 +9,5 @@ data/samples/*
 reports/*
 !reports/.gitkeep
 uv.lock
+*.py[cod]
+.pytest_cache/
