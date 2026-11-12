@@ -6,10 +6,11 @@ from typing import Literal
 import pymupdf
 from PIL import Image, UnidentifiedImageError
 
-from localdoc_ia.ingestion.ocr import ocr_image
+from localdoc_ia.config import settings
 
 
-ExtractionMethod = Literal["text", "ocr", "mixed"]
+ExtractionMethod = Literal["text", "ocr", "mixed", "vision"]
+PageExtractionMethod = Literal["text", "ocr", "vision"]
 
 
 @dataclass
@@ -17,7 +18,7 @@ class ExtractedPage:
     """Resultado de extracción de una página."""
 
     page_number: int
-    method: Literal["text", "ocr"]
+    method: PageExtractionMethod
     text: str
 
 
@@ -51,7 +52,7 @@ def has_usable_text(
     """
     Determina si una página tiene suficiente texto seleccionable.
 
-    Evita usar OCR cuando el PDF ya tiene una capa de texto útil.
+    Evita usar el modelo visual cuando el PDF ya tiene texto útil.
     """
 
     normalized_text = " ".join(text.split())
@@ -75,6 +76,11 @@ def classify_method(pages: list[ExtractedPage]) -> ExtractionMethod:
     if methods == {"ocr"}:
         return "ocr"
 
+    # Cuando alguna página no posee texto seleccionable, todo el PDF se
+    # analiza con el VLM para preservar el contexto entre sus páginas.
+    if "vision" in methods:
+        return "vision"
+
     return "mixed"
 
 
@@ -90,6 +96,7 @@ def build_result(
         f"(método: {page.method}) ---\n"
         f"{page.text}"
         for page in pages
+        if page.text.strip()
     )
 
     return ExtractionResult(
@@ -104,15 +111,14 @@ def build_result(
 
 def extract_pdf(
     file_path: Path,
-    dpi: int = 300,
-    lang: str = "spa",
     minimum_text_chars: int = 30,
 ) -> ExtractionResult:
     """
-    Extrae el texto de un PDF.
+    Inspecciona el texto nativo de un PDF.
 
-    Usa PyMuPDF cuando la página contiene texto seleccionable.
-    Usa Tesseract cuando la página necesita OCR.
+    Si una página no tiene texto seleccionable suficiente, se marca para
+    extracción visual. El renderizado y el análisis VLM se realizan luego en
+    el servicio documental, donde se envían todas las páginas juntas.
     """
 
     extracted_pages: list[ExtractedPage] = []
@@ -151,33 +157,11 @@ def extract_pdf(
 
                     continue
 
-                # Si no hay texto suficiente, convertir la página
-                # del PDF en una imagen para aplicar OCR.
-                pixmap = page.get_pixmap(
-                    dpi=dpi,
-                    colorspace=pymupdf.csRGB,
-                    alpha=False,
-                )
-
-                page_image = Image.frombytes(
-                    "RGB",
-                    (pixmap.width, pixmap.height),
-                    pixmap.samples,
-                )
-
-                try:
-                    recognized_text = ocr_image(
-                        page_image,
-                        lang=lang,
-                    )
-                finally:
-                    page_image.close()
-
                 extracted_pages.append(
                     ExtractedPage(
                         page_number=page_number,
-                        method="ocr",
-                        text=recognized_text,
+                        method="vision",
+                        text="",
                     )
                 )
 
@@ -193,18 +177,12 @@ def extract_pdf(
     )
 
 
-def extract_image(
-    file_path: Path,
-    lang: str = "spa",
-) -> ExtractionResult:
-    """Extrae el texto de una imagen utilizando OCR."""
+def extract_image(file_path: Path) -> ExtractionResult:
+    """Valida una imagen y la marca para extracción directa con VLM."""
 
     try:
         with Image.open(file_path) as image:
-            recognized_text = ocr_image(
-                image,
-                lang=lang,
-            )
+            image.verify()
 
     except (UnidentifiedImageError, OSError) as error:
         raise RuntimeError(
@@ -213,8 +191,8 @@ def extract_image(
 
     page = ExtractedPage(
         page_number=1,
-        method="ocr",
-        text=recognized_text,
+        method="vision",
+        text="",
     )
 
     return build_result(
@@ -224,10 +202,52 @@ def extract_image(
     )
 
 
+def render_pdf_pages(
+    file_path: str | Path,
+    output_dir: str | Path,
+    dpi: int | None = None,
+) -> list[Path]:
+    """Renderiza todas las páginas de un PDF en PNG para el modelo visual."""
+
+    path = Path(file_path)
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    rendered_pages: list[Path] = []
+    effective_dpi = dpi if dpi is not None else settings.ocr_dpi
+
+    try:
+        with pymupdf.open(str(path)) as pdf:
+
+            if pdf.needs_pass:
+                raise ValueError(
+                    f"El PDF está protegido con contraseña: {path.name}"
+                )
+
+            if len(pdf) == 0:
+                raise ValueError(
+                    f"El PDF no contiene páginas: {path.name}"
+                )
+
+            for page_index, page in enumerate(pdf, start=1):
+                pixmap = page.get_pixmap(
+                    dpi=effective_dpi,
+                    colorspace=pymupdf.csRGB,
+                    alpha=False,
+                )
+                output_path = destination / f"pagina_{page_index:04d}.png"
+                pixmap.save(str(output_path))
+                rendered_pages.append(output_path)
+
+    except Exception as error:
+        raise RuntimeError(
+            f"No se pudo renderizar el PDF '{path.name}': {error}"
+        ) from error
+
+    return rendered_pages
+
+
 def extract_document(
     file_path: str | Path,
-    dpi: int = 300,
-    lang: str = "spa",
 ) -> ExtractionResult:
     """
     Punto de entrada único para procesar documentos.
@@ -250,16 +270,15 @@ def extract_document(
     extension = path.suffix.lower()
 
     if extension == ".pdf":
+        # Los PDF sin texto pasan al VLM; el renderizado se realiza luego
+        # en el servicio documental usando OCR_DPI.
         return extract_pdf(
             file_path=path,
-            dpi=dpi,
-            lang=lang,
         )
 
     if extension in SUPPORTED_IMAGE_FORMATS:
         return extract_image(
             file_path=path,
-            lang=lang,
         )
 
     raise ValueError(

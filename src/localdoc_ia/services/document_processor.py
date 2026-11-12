@@ -1,25 +1,25 @@
 
-import shutil
-
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from localdoc_ia.agent.llm import extract_invoice_data
+from localdoc_ia.agent.llm import (
+    extract_invoice_data,
+    extract_invoice_from_vision,
+)
 from localdoc_ia.database.repository import (
-    save_invoice_document,
+    calculate_file_sha256,
+    complete_document_processing,
+    mark_document_failed,
+    start_document_processing,
 )
 from localdoc_ia.ingestion.extractor import (
     ExtractionResult,
     extract_document,
+    render_pdf_pages,
 )
 from localdoc_ia.schemas import InvoiceData
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-INBOX_DIR = PROJECT_ROOT / "data" / "inbox"
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
 
 @dataclass
@@ -77,19 +77,17 @@ def assess_invoice_quality(invoice: InvoiceData) -> list[str]:
 
 def process_uploaded_document(
     source_path: str | Path,
+    original_filename: str | None = None,
 ) -> DocumentProcessingResult:
     """
     Procesa un archivo recibido mediante Telegram.
 
     Flujo:
-    1. Extraer el texto.
-    2. Obtener JSON estructurado con Ollama.
-    3. Validar con Pydantic.
-    4. Evaluar posibles problemas.
-    5. Mover el archivo a processed/.
-    6. Guardar la factura en PostgreSQL.
-
-    Si falla la persistencia, intenta devolver el archivo a inbox/.
+    1. Registra el archivo recibido como pendiente en PostgreSQL.
+    2. Usa texto nativo para PDF digitales o VLM para imágenes/PDF escaneados.
+    3. Valida la respuesta con Pydantic y guarda factura + ítems en una
+       transacción.
+    4. Ante un error, conserva el original en inbox y registra estado failed.
     """
 
     source = Path(source_path).resolve()
@@ -99,54 +97,56 @@ def process_uploaded_document(
             f"No se encontró el archivo: {source}"
         )
 
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 1. Extraer texto utilizando PyMuPDF o Tesseract.
-    extraction = extract_document(source)
-
-    if not extraction.text.strip():
-        raise ValueError(
-            "No se pudo obtener texto del documento. "
-            "Revisá la calidad de la imagen o el PDF."
-        )
-
-    # 2. Extraer datos mediante Ollama.
-    # 3. Validar la respuesta mediante Pydantic.
-    invoice = extract_invoice_data(extraction.text)
-
-    # 4. Evaluar calidad sin bloquear el guardado.
-    warnings = assess_invoice_quality(invoice)
-
-    # 5. Mover el archivo antes de persistir para registrar
-    #    directamente su ubicación definitiva.
-    destination = PROCESSED_DIR / source.name
-
-    if destination.exists():
-        raise FileExistsError(
-            f"Ya existe un archivo con ese nombre: {destination}"
-        )
-
-    source.replace(destination)
+    # El hash y el INSERT de estado pending ocurren antes del trabajo pesado.
+    # La restricción UNIQUE de PostgreSQL también protege ante cargas iguales
+    # que lleguen casi al mismo tiempo.
+    file_hash = calculate_file_sha256(source)
+    document_id = start_document_processing(
+        file_path=source,
+        file_sha256=file_hash,
+        original_filename=original_filename,
+    )
 
     try:
-        # 6. Guardar factura y conceptos en una transacción.
-        document_id = save_invoice_document(
-            file_path=destination,
+        extraction = extract_document(source)
+
+        if extraction.method == "vision":
+            if extraction.file_type == "pdf":
+                # Un PDF escaneado o mixto se analiza completo como imágenes.
+                # Los PNG son temporales; el original permanece en inbox.
+                with TemporaryDirectory(prefix="localdoc_vision_") as temp_dir:
+                    page_images = render_pdf_pages(source, temp_dir)
+                    invoice = extract_invoice_from_vision(page_images)
+            else:
+                invoice = extract_invoice_from_vision(source)
+        else:
+            if not extraction.text.strip():
+                raise ValueError(
+                    "No se pudo obtener texto útil del PDF digital."
+                )
+
+            invoice = extract_invoice_data(extraction.text)
+
+        warnings = assess_invoice_quality(invoice)
+
+        # Factura e ítems se confirman juntos, desde el mismo registro pending.
+        complete_document_processing(
+            document_id=document_id,
             extraction=extraction,
             invoice=invoice,
         )
 
-    except Exception:
-        # Si falla PostgreSQL, devolver el archivo a inbox/.
-        if destination.exists() and not source.exists():
-            destination.replace(source)
-
+    except Exception as error:
+        try:
+            mark_document_failed(document_id, str(error))
+        except Exception:
+            # No ocultar el error original si el registro de fallo también falla.
+            pass
         raise
 
     return DocumentProcessingResult(
         document_id=document_id,
-        file_path=str(destination),
+        file_path=str(source),
         extraction=extraction,
         invoice=invoice,
         warnings=warnings,

@@ -7,6 +7,8 @@ from mcp.server import MCPServer
 
 from localdoc_ia.agent.context import AgentContext
 from localdoc_ia.agent.harness import AgentHarness
+from localdoc_ia.agent import harness as harness_module
+from localdoc_ia.agent.harness import serialize_tool_result
 
 
 @pytest.fixture
@@ -101,6 +103,12 @@ async def test_agent_loop_executes_mcp_tool_and_returns_answer():
     # Comprobar que el resultado MCP volvió al modelo.
     second_call_messages = fake_ollama.calls[1]["messages"]
 
+    # El contexto debe configurarse explícitamente para que el prompt,
+    # las herramientas y los resultados MCP entren en la ventana del modelo.
+    options = fake_ollama.calls[0]["options"]
+    assert options["num_ctx"] >= 8192
+    assert options["num_predict"] > 0
+
     tool_messages = [
         message
         for message in second_call_messages
@@ -132,3 +140,24 @@ def test_context_limits_conversation_history():
 
     assert context.history[0]["content"] == "Pregunta 2"
     assert context.history[-1]["content"] == "Respuesta 3"
+
+
+def test_serialize_tool_result_truncates_large_payloads(monkeypatch):
+    """Evita enviar resultados MCP que superen la ventana del modelo."""
+
+    monkeypatch.setattr(
+        harness_module.settings,
+        "max_tool_result_chars",
+        100,
+    )
+
+    result = SimpleNamespace(
+        is_error=False,
+        structured_content={"texto": "x" * 500},
+        content=[],
+    )
+
+    serialized = serialize_tool_result(result)
+
+    assert "resultado truncado por tamaño" in serialized
+    assert len(serialized) < 200

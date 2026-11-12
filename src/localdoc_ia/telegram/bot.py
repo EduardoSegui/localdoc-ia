@@ -4,8 +4,10 @@ import logging
 import mimetypes
 import re
 
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, Update
 from telegram.constants import ChatAction
@@ -19,8 +21,12 @@ from telegram.ext import (
 
 from localdoc_ia.agent.context import AgentContext
 from localdoc_ia.agent.harness import AgentHarness
-from localdoc_ia.config import settings
-from localdoc_ia.database.repository import DuplicateDocumentError
+from localdoc_ia.config import PROJECT_ROOT, settings
+from localdoc_ia.database.init_db import create_tables
+from localdoc_ia.database.repository import (
+    DocumentProcessingInProgressError,
+    DuplicateDocumentError,
+)
 from localdoc_ia.ingestion.extractor import SUPPORTED_IMAGE_FORMATS
 from localdoc_ia.services.document_processor import (
     process_uploaded_document,
@@ -29,12 +35,13 @@ from localdoc_ia.services.document_processor import (
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-INBOX_DIR = PROJECT_ROOT / "data" / "inbox"
-REPORTS_DIR = PROJECT_ROOT / "reports"
+INBOX_DIR = settings.inbox_path
+REPORTS_DIR = settings.reports_path
+APP_NAME = settings.app_name
 
 SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_FORMATS | {".pdf"}
 TELEGRAM_DOWNLOAD_LIMIT_MB = 20
+TELEGRAM_TIMEZONE = ZoneInfo("America/Argentina/Buenos_Aires")
 
 
 def is_authorized(update: Update) -> bool:
@@ -95,14 +102,14 @@ async def start(
 
     if not is_authorized(update):
         await update.effective_message.reply_text(
-            "No estás autorizado para utilizar LocalDoc AI."
+            f"No estás autorizado para utilizar {APP_NAME}."
         )
         return
 
     get_agent_context(context)
 
     await update.effective_message.reply_text(
-        "¡Hola! Soy LocalDoc AI.\n\n"
+        f"¡Hola! Soy {APP_NAME}.\n\n"
         "Puedo ayudarte a:\n"
         "• Buscar facturas y documentos.\n"
         "• Consultar gastos por proveedor y período.\n"
@@ -125,7 +132,7 @@ async def help_command(
         return
 
     await update.effective_message.reply_text(
-        "LocalDoc AI permite:\n\n"
+        f"{APP_NAME} permite:\n\n"
         "1. Enviar facturas PDF e imágenes para procesarlas.\n"
         "2. Buscar documentos por proveedor, CUIT o ID.\n"
         "3. Consultar gastos por fecha y proveedor.\n"
@@ -159,7 +166,7 @@ async def handle_text(
 
     if not is_authorized(update):
         await update.effective_message.reply_text(
-            "No estás autorizado para utilizar LocalDoc AI."
+            f"No estás autorizado para utilizar {APP_NAME}."
         )
         return
 
@@ -252,7 +259,7 @@ async def handle_document(
 
     if not is_authorized(update):
         await update.effective_message.reply_text(
-            "No estás autorizado para utilizar LocalDoc AI."
+            f"No estás autorizado para utilizar {APP_NAME}."
         )
         return
 
@@ -286,7 +293,7 @@ async def handle_photo(
 
     if not is_authorized(update):
         await update.effective_message.reply_text(
-            "No estás autorizado para utilizar LocalDoc AI."
+            f"No estás autorizado para utilizar {APP_NAME}."
         )
         return
 
@@ -342,7 +349,15 @@ async def download_and_process(
         )
         return
 
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    message_date = message.date or datetime.now(timezone.utc)
+    local_date = message_date.astimezone(TELEGRAM_TIMEZONE)
+    inbox_directory = (
+        INBOX_DIR
+        / "telegram"
+        / f"{local_date.year:04d}"
+        / f"{local_date.month:02d}"
+    )
+    inbox_directory.mkdir(parents=True, exist_ok=True)
 
     # Evitar path traversal y colisiones de nombres.
     safe_name = re.sub(
@@ -354,11 +369,13 @@ async def download_and_process(
     if not Path(safe_name).suffix:
         safe_name += extension
 
-    destination = INBOX_DIR / f"{uuid4().hex}_{safe_name}"
+    destination = inbox_directory / (
+        f"{message.message_id}_{uuid4().hex}_{safe_name}"
+    )
 
     await message.reply_text(
         f"Recibí el archivo '{original_name}'.\n"
-        "Voy a extraer el texto, identificar los datos de la factura "
+        "Voy a analizarlo, identificar los datos de la factura "
         "y guardarlos en PostgreSQL."
     )
 
@@ -380,11 +397,12 @@ async def download_and_process(
             )
             return
 
-        # OCR, Ollama y SQLAlchemy son operaciones síncronas.
+        # VLM, Ollama y SQLAlchemy son operaciones síncronas.
         # Ejecutarlas en otro hilo evita bloquear el event loop.
         result = await asyncio.to_thread(
             process_uploaded_document,
             destination,
+            original_name,
         )
 
         invoice = result.invoice
@@ -393,37 +411,96 @@ async def download_and_process(
         # "Generá un reporte de esta factura".
         agent_context = get_agent_context(context)
 
+        obs_summary = (
+            " | ".join(invoice.observations)
+            if invoice.observations else "Ninguna"
+        )
+        items_summary = (
+            ", ".join(
+                f"{it.description} (${it.line_total or it.unit_price or '0'})"
+                for it in invoice.items
+            )
+            if invoice.items else "Ninguno"
+        )
+
         agent_context.remember_exchange(
             user_message=f"El usuario cargó el archivo {original_name}.",
             assistant_message=(
                 f"Se procesó y guardó la factura con ID "
                 f"{result.document_id}. "
-                f"Proveedor: {invoice.supplier_name}. "
-                f"Total: {invoice.total} {invoice.currency or ''}."
+                f"Proveedor: {invoice.supplier_name or 'No identificado'}. "
+                f"Total: {invoice.total if invoice.total is not None else 'No identificado'} "
+                f"{invoice.currency or ''}. "
+                f"Ítems reconocidos: {items_summary}. "
+                f"Observaciones/datos extraídos: {obs_summary}."
             ),
         )
 
-        summary = (
-            "Documento procesado y guardado correctamente.\n\n"
-            f"ID interno: {result.document_id}\n"
-            f"Archivo: {original_name}\n"
-            f"Proveedor: {invoice.supplier_name or 'No identificado'}\n"
-            f"Comprobante: {invoice.document_type or 'No identificado'}\n"
-            f"Fecha: {invoice.issue_date or 'No identificada'}\n"
-            f"Moneda: {invoice.currency or 'No identificada'}\n"
-            f"Subtotal: {invoice.subtotal if invoice.subtotal is not None else 'No identificado'}\n"
-            f"Impuestos: {invoice.tax_total if invoice.tax_total is not None else 'No identificados'}\n"
-            f"Total: {invoice.total if invoice.total is not None else 'No identificado'}\n"
-            f"Método de extracción: {result.extraction.method}\n"
-            f"Ítems reconocidos: {len(invoice.items)}"
+        if result.extraction.method == "vision":
+            method_label = "procesamiento de visión"
+        elif result.extraction.method == "ocr":
+            method_label = "procesamiento OCR"
+        elif result.extraction.method == "text":
+            method_label = "texto nativo"
+        else:
+            method_label = f"extracción {result.extraction.method}"
+
+        summary_lines = [
+            "Documento procesado y guardado correctamente.\n",
+            f"ID interno: {result.document_id}",
+            f"Archivo: {original_name}",
+            f"Proveedor: {invoice.supplier_name or 'No identificado'}",
+        ]
+
+        if invoice.supplier_tax_id:
+            summary_lines.append(f"CUIT Proveedor: {invoice.supplier_tax_id}")
+
+        if invoice.customer_name:
+            summary_lines.append(f"Cliente: {invoice.customer_name}")
+        if invoice.customer_tax_id:
+            summary_lines.append(f"CUIT/DNI Cliente: {invoice.customer_tax_id}")
+
+        summary_lines.extend(
+            [
+                f"Comprobante: {invoice.document_type or 'No identificado'}",
+                f"Fecha: {invoice.issue_date or 'No identificada'}",
+                f"Moneda: {invoice.currency or 'No identificada'}",
+                f"Subtotal: {invoice.subtotal if invoice.subtotal is not None else 'No identificado'}",
+                f"Impuestos: {invoice.tax_total if invoice.tax_total is not None else 'No identificados'}",
+                f"Total: {invoice.total if invoice.total is not None else 'No identificado'}",
+                f"Método de extracción: {result.extraction.method}",
+                f"Ítems reconocidos: {len(invoice.items)}",
+            ]
         )
 
-        if result.warnings:
-            summary += "\n\nAdvertencias para revisar:\n"
-            summary += "\n".join(
-                f"• {warning}"
-                for warning in result.warnings
+        if invoice.items:
+            summary_lines.append("\nÍtems reconocidos:")
+            for item in invoice.items:
+                details = []
+                if item.quantity is not None:
+                    details.append(f"Cant: {item.quantity}")
+                if item.unit_price is not None:
+                    details.append(f"Precio: ${item.unit_price}")
+                if item.line_total is not None:
+                    details.append(f"Total: ${item.line_total}")
+                detail_str = f" ({', '.join(details)})" if details else ""
+                summary_lines.append(
+                    f"• {item.line_number or '-'}. {item.description}{detail_str}"
+                )
+
+        if invoice.observations:
+            summary_lines.append(
+                f"\nObservaciones extraídas ({method_label}):"
             )
+            for obs in invoice.observations:
+                summary_lines.append(f"• {obs}")
+
+        if result.warnings:
+            summary_lines.append("\nAdvertencias para revisar:")
+            for warning in result.warnings:
+                summary_lines.append(f"• {warning}")
+
+        summary = "\n".join(summary_lines)
 
         await reply_in_chunks(message, summary)
 
@@ -433,6 +510,25 @@ async def download_and_process(
             f"ID del documento existente: {error.document_id}"
         )
 
+    except DocumentProcessingInProgressError as error:
+        await message.reply_text(
+            "Este archivo ya está siendo procesado.\n"
+            f"ID del documento existente: {error.document_id}"
+        )
+
+    except (RuntimeError, ValueError) as error:
+        logger.exception(
+            "No se pudo extraer información del documento recibido."
+        )
+
+        await message.reply_text(
+            "No pude extraer los datos del documento.\n\n"
+            f"Motivo: {error}\n\n"
+            "El archivo descargado se conserva en "
+            f"{settings.inbox_path} "
+            "para que puedas reintentarlo tras corregir la configuración."
+        )
+
     except Exception:
         logger.exception(
             "Error procesando el archivo recibido por Telegram."
@@ -440,7 +536,8 @@ async def download_and_process(
 
         await message.reply_text(
             "No pude procesar el documento.\n"
-            "El archivo descargado se conserva en data/inbox/ "
+            "El archivo descargado se conserva en "
+            f"{settings.inbox_path} "
             "para que puedas revisar el problema."
         )
 
@@ -450,7 +547,7 @@ async def post_init(application: Application) -> None:
 
     await application.bot.set_my_commands(
         [
-            BotCommand("start", "Iniciar LocalDoc AI"),
+            BotCommand("start", f"Iniciar {APP_NAME}"),
             BotCommand("ayuda", "Ver funcionalidades"),
             BotCommand("reset", "Reiniciar conversación"),
         ]
@@ -468,7 +565,9 @@ async def error_handler(
 
 
 def main() -> None:
-    """Punto de entrada del bot."""
+    """Inicializa el esquema y ejecuta el bot."""
+
+    create_tables()
 
     token = settings.telegram_bot_token
 
@@ -486,7 +585,7 @@ def main() -> None:
     application = (
         Application.builder()
         .token(token)
-        .concurrent_updates(1)
+        .concurrent_updates(4)
         .post_init(post_init)
         .build()
     )
@@ -505,7 +604,7 @@ def main() -> None:
 
     application.add_handler(
         MessageHandler(
-            filters.Document.ALL,
+            filters.Document.IMAGE | filters.Document.PDF,
             handle_document,
         )
     )
@@ -526,7 +625,11 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Iniciando LocalDoc AI Telegram Bot...")
+    logger.info(
+        "Iniciando %s Telegram Bot (entorno: %s)...",
+        APP_NAME,
+        settings.app_env,
+    )
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
@@ -535,7 +638,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.INFO,
+        level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 

@@ -1,5 +1,6 @@
 import json
 import logging
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,78 @@ from localdoc_ia.mcp.server import mcp as localdoc_mcp_server
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS_PER_ROUND = 5
+OUT_OF_SCOPE_RESPONSE = (
+    "Solo puedo ayudar con consultas de la base de datos y consejos "
+    "básicos de ventas."
+)
+
+# Se usan raíces para contemplar plurales y conjugaciones habituales en
+# español sin exponer el modelo a mensajes claramente fuera de alcance.
+DATABASE_SCOPE_TERMS = (
+    "factur",
+    "document",
+    "comprobante",
+    "proveedor",
+    "cliente",
+    "gasto",
+    "importe",
+    "total",
+    "subtotal",
+    "impuesto",
+    "iva",
+    "cuit",
+    "reporte",
+    "export",
+    "csv",
+    "base de datos",
+    "registro",
+    "archivo",
+    "carga",
+    "saldo",
+    "monto",
+    "estadistica",
+    "promedio",
+    "maximo",
+    "minimo",
+    "mayor",
+    "menor",
+    "compar",
+    "item",
+    "producto",
+    "servicio",
+    "precio",
+    "periodo",
+    "ranking",
+    "top",
+    "diferencia",
+)
+SALES_SCOPE_TERMS = (
+    "venta",
+    "vender",
+    "comercial",
+    "prospe",
+    "seguimiento",
+    "objecion",
+    "cierre",
+    "propuesta de valor",
+    "negoci",
+    "lead",
+)
+
+
+def is_allowed_agent_request(user_message: str) -> bool:
+    """Acepta únicamente consultas documentales o de ventas básicas."""
+
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFD", user_message.casefold())
+        if unicodedata.category(character) != "Mn"
+    )
+
+    return any(
+        term in normalized
+        for term in DATABASE_SCOPE_TERMS + SALES_SCOPE_TERMS
+    )
 
 
 @dataclass
@@ -104,11 +177,22 @@ def serialize_tool_result(result: Any) -> str:
             "content": content_items,
         }
 
-    return json.dumps(
+    serialized = json.dumps(
         payload,
         ensure_ascii=False,
         default=str,
     )
+
+    # Un resultado MCP demasiado grande puede superar la ventana de contexto
+    # del modelo. Se recorta de forma explícita para que el agente sepa que
+    # la información está incompleta en lugar de entrar en un bucle.
+    if len(serialized) > settings.max_tool_result_chars:
+        serialized = (
+            serialized[: settings.max_tool_result_chars]
+            + "\n...[resultado truncado por tamaño]"
+        )
+
+    return serialized
 
 
 async def list_all_mcp_tools(
@@ -157,7 +241,10 @@ class AgentHarness:
         self.ollama_client = (
             ollama_client
             if ollama_client is not None
-            else AsyncClient(host=settings.ollama_host)
+            else AsyncClient(
+                host=settings.ollama_host,
+                timeout=settings.ollama_timeout,
+            )
         )
 
         self.mcp_server = (
@@ -192,6 +279,20 @@ class AgentHarness:
         El agente puede ejecutar herramientas MCP y volver
         a consultar Ollama hasta producir una respuesta final.
         """
+
+        if not is_allowed_agent_request(user_message):
+            self.context.remember_exchange(
+                user_message=user_message,
+                assistant_message=OUT_OF_SCOPE_RESPONSE,
+            )
+
+            return AgentResponse(
+                answer=OUT_OF_SCOPE_RESPONSE,
+                tools_used=[],
+                model_calls=0,
+                tool_rounds=0,
+                tool_results=[],
+            )
 
         system_prompt = build_agent_system_prompt()
 
@@ -241,6 +342,12 @@ class AgentHarness:
                         tools=ollama_tools,
                         options={
                             "temperature": settings.ollama_temperature,
+                            # Sin num_ctx Ollama usa 4096 tokens y descarta
+                            # parte del prompt cuando el resultado MCP es
+                            # grande, provocando respuestas incompletas o
+                            # repeticiones infinitas.
+                            "num_ctx": settings.ollama_num_ctx,
+                            "num_predict": settings.ollama_num_predict,
                         },
                         stream=False,
                     )
@@ -258,6 +365,14 @@ class AgentHarness:
 
                 assistant_message = response.message
                 tool_calls = assistant_message.tool_calls or []
+                done_reason = getattr(response, "done_reason", None)
+
+                if done_reason == "length":
+                    logger.warning(
+                        "Ollama alcanzó el límite de salida "
+                        "(num_predict=%s).",
+                        settings.ollama_num_predict,
+                    )
 
                 # Incorporar el mensaje completo del asistente.
                 # Es importante conservar tool_calls para que
@@ -276,6 +391,11 @@ class AgentHarness:
                         answer = (
                             "No pude generar una respuesta textual "
                             "para esta consulta."
+                        )
+                    elif done_reason == "length":
+                        answer += (
+                            "\n\n(La respuesta se cortó por el límite "
+                            "de longitud del modelo.)"
                         )
 
                     self.context.remember_exchange(

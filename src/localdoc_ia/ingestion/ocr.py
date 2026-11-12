@@ -1,8 +1,10 @@
 from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 import pytesseract
 
+from localdoc_ia.config import settings
 
-DEFAULT_OCR_LANG = "spa"
+
+DEFAULT_OCR_LANG = settings.ocr_lang
 # --oem 3 usa el motor LSTM por defecto.
 # --psm 4 es excelente para facturas porque asume columnas de texto de tamaño variable.
 DEFAULT_OCR_CONFIG = "--oem 3 --psm 4"
@@ -10,12 +12,14 @@ DEFAULT_OCR_CONFIG = "--oem 3 --psm 4"
 
 def ocr_image(
     image: Image.Image,
-    lang: str = DEFAULT_OCR_LANG,
+    lang: str | None = None,
     config: str = DEFAULT_OCR_CONFIG,
 ) -> str:
     """
     Reconoce el texto de una imagen utilizando Tesseract OCR con preprocesamiento avanzado.
     """
+
+    selected_lang = lang or settings.ocr_lang
 
     # 1. Corregir la orientación según los metadatos EXIF
     prepared_image = ImageOps.exif_transpose(image)
@@ -44,29 +48,30 @@ def ocr_image(
     # Ejecutar el reconocimiento OCR
     extracted_text = pytesseract.image_to_string(
         prepared_image,
-        lang=lang,
+        lang=selected_lang,
         config=config,
     )
 
     return extracted_text.strip()
 
 
-def check_ocr_environment(lang: str = DEFAULT_OCR_LANG) -> dict:
+def check_ocr_environment(lang: str | None = None) -> dict:
     """
     Comprueba que Tesseract y el idioma solicitado estén disponibles.
     """
 
+    selected_lang = lang or settings.ocr_lang
     version = str(pytesseract.get_tesseract_version())
     available_languages = pytesseract.get_languages(config="")
 
-    if lang not in available_languages:
+    if selected_lang not in available_languages:
         raise RuntimeError(
-            f"No está instalado el idioma '{lang}'. "
+            f"No está instalado el idioma '{selected_lang}'. "
             f"Idiomas disponibles: {available_languages}"
         )
 
     return {
         "tesseract_version": version,
-        "language": lang,
+        "language": selected_lang,
         "available_languages": available_languages,
     }

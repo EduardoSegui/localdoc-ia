@@ -7,7 +7,7 @@ from localdoc_ia.config import settings
 
 
 async def main() -> None:
-    """Inicia una sesión conversacional con LocalDoc AI."""
+    """Inicia una sesión conversacional con el agente."""
 
     context = AgentContext(
         max_turns=settings.max_conversation_turns
@@ -18,7 +18,7 @@ async def main() -> None:
     )
 
     print("=" * 60)
-    print("LOCALDOC AI")
+    print(settings.app_name.upper())
     print("Asistente inteligente de gestión documental")
     print("=" * 60)
 
@@ -40,18 +40,18 @@ async def main() -> None:
                 continue
 
             if user_message.lower() in {"/salir", "/exit", "/quit"}:
-                print("\nLocalDoc AI: ¡Hasta luego!")
+                print(f"\n{settings.app_name}: ¡Hasta luego!")
                 break
 
             if user_message.lower() == "/reset":
                 context.clear()
-                print("\nLocalDoc AI: Contexto reiniciado.")
+                print(f"\n{settings.app_name}: Contexto reiniciado.")
                 continue
 
             try:
                 result = await agent.ask(user_message)
 
-                print(f"\nLocalDoc AI: {result.answer}")
+                print(f"\n{settings.app_name}: {result.answer}")
 
                 if result.tools_used:
                     print(

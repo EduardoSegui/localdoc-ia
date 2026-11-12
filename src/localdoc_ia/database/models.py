@@ -35,7 +35,7 @@ class Document(Base):
             name="ck_documents_processing_status",
         ),
         CheckConstraint(
-            "extraction_method IN ('text', 'ocr', 'mixed')",
+            "extraction_method IN ('text', 'ocr', 'mixed', 'vision')",
             name="ck_documents_extraction_method",
         ),
         Index("ix_documents_issue_date", "issue_date"),
@@ -159,7 +159,7 @@ class Document(Base):
         nullable=True,
     )
 
-    # Información extraída por PyMuPDF / Tesseract
+    # Información obtenida desde texto nativo o extracción visual
     extraction_method: Mapped[str | None] = mapped_column(
         String(20),
         nullable=True,
@@ -174,6 +174,13 @@ class Document(Base):
     extracted_data: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
+    )
+
+    # Observaciones y notas extraídas por el modelo
+    observations: Mapped[list[str] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=list,
     )
 
     # Seguimiento del procesamiento
