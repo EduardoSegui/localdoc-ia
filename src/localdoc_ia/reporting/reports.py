@@ -42,6 +42,7 @@ def generar_reporte_facturas(
     proveedor: str | None = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    document_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Genera un CSV con las facturas que coinciden con los filtros.
@@ -54,6 +55,7 @@ def generar_reporte_facturas(
         proveedor=proveedor,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
+        document_id=document_id,
     )
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)

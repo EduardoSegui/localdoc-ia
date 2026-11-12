@@ -34,6 +34,7 @@ def buscar_documentos(
     proveedor: str | None = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    document_id: int | None = None,
     limite: int = 20,
     desplazamiento: int = 0,
 ) -> dict[str, Any]:
@@ -56,6 +57,7 @@ def buscar_documentos(
         fecha_hasta=fecha_hasta,
         limite=limite,
         desplazamiento=desplazamiento,
+        document_id=document_id,
     )
 
 
@@ -63,6 +65,7 @@ def buscar_documentos(
 def consultar_gastos(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    document_id: int | None = None,
     proveedor: str | None = None,
 ) -> dict[str, Any]:
     """
@@ -81,6 +84,7 @@ def consultar_gastos(
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
         proveedor=proveedor,
+        document_id=document_id,
     )
 
 
@@ -89,6 +93,7 @@ def generar_reporte(
     termino: str | None = None,
     proveedor: str | None = None,
     fecha_desde: date | None = None,
+    document_id: int | None = None,
     fecha_hasta: date | None = None,
 ) -> dict[str, Any]:
     """
@@ -107,6 +112,7 @@ def generar_reporte(
         proveedor=proveedor,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
+        document_id=document_id,
     )
 
 

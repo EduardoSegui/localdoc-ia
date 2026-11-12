@@ -18,10 +18,16 @@ from localdoc_ia.schemas import InvoiceData
 # repository.py -> database -> localdoc_ia -> src -> raíz
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-
 class DuplicateDocumentError(Exception):
     """Se produce cuando se intenta guardar un archivo ya registrado."""
 
+    def __init__(self, document_id: int):
+        self.document_id = document_id
+
+        super().__init__(
+            f"El documento ya está registrado. "
+            f"ID existente: {document_id}"
+        )
 
 def calculate_file_sha256(file_path: Path) -> str:
     """
@@ -103,10 +109,7 @@ def save_invoice_document(
             )
 
             if existing_document_id is not None:
-                raise DuplicateDocumentError(
-                    f"El documento ya está registrado. "
-                    f"ID existente: {existing_document_id}"
-                )
+                raise DuplicateDocumentError(existing_document_id)
 
             # 5. Crear el registro principal
             document = Document(

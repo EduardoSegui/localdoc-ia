@@ -14,6 +14,7 @@ def _build_filters(
     proveedor: str | None = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    document_id: int | None = None,
 ) -> list[Any]:
     """Construye filtros reutilizables para las consultas."""
 
@@ -23,6 +24,12 @@ def _build_filters(
         )
 
     filters = []
+
+    if document_id is not None:
+        if document_id < 1:
+            raise ValueError("El ID del documento debe ser positivo.")
+
+        filters.append(Document.id == document_id)
 
     if termino and termino.strip():
         pattern = f"%{termino.strip()}%"
@@ -110,6 +117,7 @@ def buscar_documentos(
     fecha_hasta: date | None = None,
     limite: int = 20,
     desplazamiento: int = 0,
+    document_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Busca documentos por texto, proveedor y rango de fechas.
@@ -129,6 +137,7 @@ def buscar_documentos(
         proveedor=proveedor,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
+        document_id=document_id,
     )
 
     with SessionLocal() as session:
@@ -164,6 +173,7 @@ def consultar_gastos(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
     proveedor: str | None = None,
+    document_id: int | None = None
 ) -> dict[str, Any]:
     """
     Calcula gastos agrupados por moneda y proveedor.
@@ -176,6 +186,7 @@ def consultar_gastos(
         proveedor=proveedor,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
+        document_id=document_id
     )
 
     filters.append(Document.processing_status == "completed")
@@ -273,6 +284,7 @@ def obtener_documentos_para_reporte(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
     maximo_registros: int = 10000,
+    document_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """
     Recupera documentos para exportarlos.
@@ -290,6 +302,7 @@ def obtener_documentos_para_reporte(
         proveedor=proveedor,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
+        document_id=document_id,
     )
 
     with SessionLocal() as session:

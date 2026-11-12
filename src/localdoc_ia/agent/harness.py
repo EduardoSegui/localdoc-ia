@@ -1,4 +1,3 @@
-
 import json
 import logging
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ class AgentResponse:
     tools_used: list[str]
     model_calls: int
     tool_rounds: int
+    tool_results: list[dict[str, Any]]
 
 
 def convert_mcp_tools_to_ollama(
@@ -203,6 +203,7 @@ class AgentHarness:
         tools_used: list[str] = []
         model_calls = 0
         tool_rounds = 0
+        tool_results: list[dict[str, Any]] = []
 
         # Conectar con el servidor MCP.
         # La conexión en memoria utiliza el protocolo MCP real.
@@ -287,6 +288,7 @@ class AgentHarness:
                         tools_used=tools_used,
                         model_calls=model_calls,
                         tool_rounds=tool_rounds,
+                        tool_results=tool_results,
                     )
 
                 # 5. Comprobar límite de rondas
@@ -309,6 +311,7 @@ class AgentHarness:
                         tools_used=tools_used,
                         model_calls=model_calls,
                         tool_rounds=tool_rounds,
+                        tool_results=tool_results,
                     )
 
                 tool_rounds += 1
@@ -392,6 +395,19 @@ class AgentHarness:
                                 },
                                 ensure_ascii=False,
                             )
+                            
+                    # Registrar los resultados de las herramientas para el AgentResponse
+                    try:
+                        parsed_tool_result = json.loads(tool_output)
+                    except json.JSONDecodeError:
+                        parsed_tool_result = {
+                            "content": tool_output
+                        }
+                    
+                    tool_results.append({
+                        "tool_name": tool_name,
+                        "result": parsed_tool_result,
+                    })
 
                     # 7. Devolver el resultado al modelo.
                     # Este paso es fundamental para completar
