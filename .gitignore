@@ -8,6 +8,6 @@ data/samples/*
 !data/**/.gitkeep
 reports/*
 !reports/.gitkeep
-uv.lock
+
 *.py[cod]
 .pytest_cache/
